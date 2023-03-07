@@ -1,0 +1,206 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[ ]:
+
+
+from subprocess import Popen, PIPE
+import chestnut.arduino
+from pyfirmata import Arduino
+import pyfirmata
+import time
+import board as bd
+import adafruit_dht
+import RPi.GPIO as GPIO
+#from time import time, sleep
+from urllib.request import urlopen
+import sys
+
+#cloud setting
+WRITE_API = "57K5VCUJ7C5XONLH" # Replace your ThingSpeak API key here
+BASE_URL = "https://api.thingspeak.com/update?api_key={}".format(WRITE_API)
+
+
+#getting the name of arduino board
+get_ipython().run_cell_magic('bash', '', '# ^^^ The commands below are to be executed as Linux Bash commands. \n# You can get the same output by opening a terminal connection to the device and executing these commands manually.\n\ndmesg | grep -v disconnect | grep -Eo "tty(ACM|USB)." | tail -1 ')
+
+#controlin arduino by rp
+stdout = Popen('dmesg | grep -v disconnect | grep -Eo "ttyACM0" | tail -1', shell=True, stdout=PIPE).stdout
+output = stdout.read()  # Output in binary form'
+encoding = 'utf-8'     
+port = str(output, encoding) #encoding to str
+port_str = '/dev/' + port    # build the dev from Linux
+port = port_str.split('\n')[0] # remove a \n inside the string
+print (port)
+
+#removing old data from arduino and flashing new data
+chestnut.arduino.flash_firmata(board='uno', port= port, debug=True) # port from Linux
+
+#start of our code-defining all of the ports of arduino and rpi
+board = Arduino(port)  #port from Linux
+s = pyfirmata.util.Iterator(board)
+s.start()
+dhtDevice = adafruit_dht.DHT11(bd.D18)
+
+#importing the pins
+pin01 =  board.get_pin('a:0:i')     #soil moisture
+pin1  =  board.get_pin('a:1:i')     #LDR
+pin10 =  board.get_pin('d:10:p')    #dry led-red (soil moisture)
+pin11 =  board.get_pin('d:11:p')    #wet led-blue(soil moisture)
+pin3  =  board.get_pin('d:3:p')     #white-bright(ldr)
+pin9  =  board.get_pin('d:9:p')     #dark-yellow(ldr)
+pin6  =  board.get_pin('d:6:p')     #relay
+pin5  =  board.get_pin('d:5:p')     #green(motor is workin-)
+
+#lcd
+LCD_RS = 7
+LCD_E  = 8
+LCD_D4 = 25
+LCD_D5 = 24
+LCD_D6 = 23
+LCD_D7 = 19
+
+# Define some device constants
+LCD_WIDTH = 16    # Maximum characters per line
+LCD_CHR = True
+LCD_CMD = False
+LCD_LINE_1 = 0x80 # LCD RAM address for the 1st line
+LCD_LINE_2 = 0xC0 # LCD RAM address for the 2nd line
+# Timing constants
+E_PULSE = 0.0005
+E_DELAY = 0.0005
+def main():
+  # Main program block
+  GPIO.setwarnings(False)
+  GPIO.setmode(GPIO.BCM)       # Use BCM GPIO numbers
+  GPIO.setup(LCD_E, GPIO.OUT)  # E
+  GPIO.setup(LCD_RS, GPIO.OUT) # RS
+  GPIO.setup(LCD_D4, GPIO.OUT) # DB4
+  GPIO.setup(LCD_D5, GPIO.OUT) # DB5
+  GPIO.setup(LCD_D6, GPIO.OUT) # DB6
+  GPIO.setup(LCD_D7, GPIO.OUT) # DB7
+  # Initialise display
+  lcd_init()
+
+  while True:
+
+    x=(pin01.read())*1024 #moisture level-soil
+    y=(pin1.read())*1000 #brightness level
+    print("Moisture level is {} ".format(x))# Printingsoil moisture
+    print("Brightness level is {} ".format(y))# Printingsoil moisture
+    if y<130:
+        board.digital[9].write(1)
+        board.digital[3].write(0)
+    else:
+        board.digital[9].write(0)
+        board.digital[3].write(1)
+    if x>400:
+        board.digital[6].write(1)#turning on the motor
+        board.digital[5].write(1)
+        board.digital[10].write(1)
+        board.digital[11].write(0)
+        lcd_string("soil is dry",LCD_LINE_1)
+        lcd_string("the pump is on",LCD_LINE_2)
+        time.sleep(1)
+        lcd_string("brightness:"+str(y),LCD_LINE_1)
+        #lcd_string("moisture level is" + str(int(x)), LCD_LINE_2)
+        time.sleep(1)
+    else:
+        board.digital[5].write(0)
+        board.digital[6].write(0)
+        board.digital[10].write(0)
+        board.digital[11].write(1)
+        lcd_string("soil is wet",LCD_LINE_1)
+        lcd_string("the pump is off",LCD_LINE_2)
+        time.sleep(1)
+        lcd_string("brightness:"+str(y),LCD_LINE_1)
+        time.sleep(1)
+        #lcd_string("moisture level is " + str(x), LCD_LINE_2)
+    try:
+        temp_c=dhtDevice.temperature
+        humidity = dhtDevice.humidity
+        print("Temp:{:.1f}c   Humidity:{}%".format(temp_c,humidity))
+        lcd_string("Temperature:"+str(temp_c)+"C",LCD_LINE_1)
+        lcd_string("Humidity:"+str(humidity)+"%",LCD_LINE_2)
+        time.sleep(2)
+        thingspeakHttp = BASE_URL + "&field1={:.2f}&field2={:.2f}&field3={:.2f}&field4={:.2f}".format(temp_c,humidity,x,y)
+        print(thingspeakHttp)
+        conn = urlopen(thingspeakHttp)
+        print("Response: {}".format(conn.read()))
+        conn.close() 
+        time.sleep(0.1)
+    except RuntimeError as error:
+        print(error.args[0])
+        continue
+    except Exception as error:
+        dhtDevice.exit()
+        raise error
+
+def lcd_init():
+  # Initialise display
+  lcd_byte(0x33,LCD_CMD) # 110011 Initialise
+  lcd_byte(0x32,LCD_CMD) # 110010 Initialise
+  lcd_byte(0x06,LCD_CMD) # 000110 Cursor move direction
+  lcd_byte(0x0C,LCD_CMD) # 001100 Display On,Cursor Off, Blink Off
+  lcd_byte(0x28,LCD_CMD) # 101000 Data length, number of lines, font size
+  lcd_byte(0x01,LCD_CMD) # 000001 Clear display
+  time.sleep(E_DELAY)
+
+def lcd_byte(bits, mode):
+  GPIO.output(LCD_RS, mode) # RS
+  # High bits
+  GPIO.output(LCD_D4, False)
+  GPIO.output(LCD_D5, False)
+  GPIO.output(LCD_D6, False)
+  GPIO.output(LCD_D7, False)
+  if bits&0x10==0x10:
+    GPIO.output(LCD_D4, True)
+  if bits&0x20==0x20:
+    GPIO.output(LCD_D5, True)
+  if bits&0x40==0x40:
+    GPIO.output(LCD_D6, True)
+  if bits&0x80==0x80:
+    GPIO.output(LCD_D7, True)
+
+  # Toggle 'Enable' pin
+  lcd_toggle_enable()
+
+  # Low bits
+  GPIO.output(LCD_D4, False)
+  GPIO.output(LCD_D5, False)
+  GPIO.output(LCD_D6, False)
+  GPIO.output(LCD_D7, False)
+  if bits&0x01==0x01:
+    GPIO.output(LCD_D4, True)
+  if bits&0x02==0x02:
+    GPIO.output(LCD_D5, True)
+  if bits&0x04==0x04:
+    GPIO.output(LCD_D6, True)
+  if bits&0x08==0x08:
+    GPIO.output(LCD_D7, True)
+  # Toggle 'Enable' pin
+  lcd_toggle_enable()
+def lcd_toggle_enable():
+  # Toggle enable
+  time.sleep(E_DELAY)
+  GPIO.output(LCD_E, True)
+  time.sleep(E_PULSE)
+  GPIO.output(LCD_E, False)
+  time.sleep(E_DELAY)
+
+def lcd_string(message,line):
+  # Send string to display
+  message = message.ljust(LCD_WIDTH," ")
+  lcd_byte(line, LCD_CMD)
+  for i in range(LCD_WIDTH):
+    lcd_byte(ord(message[i]),LCD_CHR)
+if __name__ == '__main__':
+  try:
+    main()
+  except KeyboardInterrupt:
+    pass
+  finally:
+    lcd_byte(0x01, LCD_CMD)
+    lcd_string("IOT Project!",LCD_LINE_1)
+    lcd_string("Smart garden",LCD_LINE_2)
+    GPIO.cleanup()
